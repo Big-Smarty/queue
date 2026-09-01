@@ -1,23 +1,116 @@
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicPtr, AtomicUsize, Ordering},
+};
 
 pub mod list;
 pub mod node;
 
-pub struct QueueLl<T> {
+#[cfg(test)]
+mod tests;
+
+pub fn queue_ll<T: Default, const L: usize>() -> (Owner<T, L>, Stealer<T, L>) {
+    let inner = Arc::new(Inner::default());
+    (
+        Owner {
+            inner: inner.clone(),
+        },
+        Stealer {
+            inner: inner.clone(),
+        },
+    )
+}
+
+#[derive(Default)]
+pub struct Owner<T, const L: usize> {
+    inner: Arc<Inner<T, L>>,
+}
+
+#[derive(Default)]
+pub struct Stealer<T, const L: usize> {
+    inner: Arc<Inner<T, L>>,
+}
+
+impl<T: Default, const L: usize> Owner<T, L> {
+    pub fn push(&self, nodes: list::List<T>) {
+        self.inner.push(nodes);
+    }
+
+    pub fn pop(&self) -> *mut node::Node<T> {
+        self.inner.pop()
+    }
+}
+
+impl<T: Default, const L: usize> Stealer<T, L> {
+    pub fn steal(&self, proportion: f64) -> list::List<T> {
+        self.inner.steal(proportion)
+    }
+}
+
+#[derive(Default)]
+struct Inner<T, const L: usize> {
     size: AtomicUsize,
     head: AtomicPtr<node::Node<T>>,
 }
 
-impl<T> QueueLl<T> {
-    pub fn steal(&mut self, proportion: f64) -> list::List<T> {
-        todo!()
+impl<T: Default, const L: usize> Inner<T, L> {
+    pub fn steal(&self, proportion: f64) -> list::List<T> {
+        let proportion = 1.0 - proportion;
+        let sz = self.size.load(Ordering::Acquire);
+
+        if sz < Self::LIMIT {
+            return list::List::default();
+        }
+
+        let mut n_skip = (sz as f64 * proportion) as usize;
+
+        let k = n_skip;
+
+        let mut start = self.head.load(Ordering::Acquire);
+        while n_skip != 0 && !start.is_null() {
+            start = unsafe { node::Node::next(start, Ordering::Acquire) };
+            n_skip -= 1;
+        }
+
+        if n_skip != 0 || start.is_null() {
+            return list::List::default();
+        }
+
+        let ssz = self.size.load(Ordering::Acquire);
+        if ssz <= (sz - (k >> 1)) {
+            return list::List::default();
+        }
+
+        let begin = unsafe { node::Node::next(start, Ordering::Acquire) };
+        unsafe { std::ptr::read(start) }
+            .next
+            .store(std::ptr::null_mut(), Ordering::Relaxed);
+        self.size.fetch_add(0, Ordering::Release);
+
+        let mut end = begin;
+        let mut count = 0;
+        while !end.is_null() {
+            count += 1;
+            if unsafe { std::ptr::read(end) }.next.into_inner().is_null() {
+                break;
+            }
+            end = unsafe { std::ptr::read(end) }.next.into_inner();
+        }
+
+        self.size.fetch_sub(count, Ordering::SeqCst);
+
+        list::List {
+            start: begin,
+            end,
+            size: count,
+        }
     }
 
-    pub fn pop(&mut self) -> Option<*mut node::Node<T>> {
+    pub fn pop(&self) -> *mut node::Node<T> {
         let rv = self.head.load(Ordering::Relaxed);
 
         if rv.is_null() {
-            return None;
+            return std::ptr::null_mut();
         }
 
         self.head.store(
@@ -31,10 +124,10 @@ impl<T> QueueLl<T> {
             .next
             .store(std::ptr::null_mut(), Ordering::Relaxed);
 
-        Some(rv)
+        rv
     }
 
-    pub fn push(&mut self, nodes: &list::List<T>) {
+    pub fn push(&self, nodes: list::List<T>) {
         let start = nodes.start;
         let end = nodes.end;
         let n = nodes.size;
@@ -46,13 +139,6 @@ impl<T> QueueLl<T> {
         self.head.store(start, Ordering::Release);
         self.size.fetch_add(n, Ordering::AcqRel);
     }
-}
 
-impl<T> Default for QueueLl<T> {
-    fn default() -> Self {
-        Self {
-            size: Default::default(),
-            head: Default::default(),
-        }
-    }
+    const LIMIT: usize = L;
 }
