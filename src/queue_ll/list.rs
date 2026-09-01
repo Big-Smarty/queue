@@ -1,5 +1,6 @@
 use crate::queue_ll::node;
 
+#[derive(Default)]
 pub struct List<T> {
     pub start: *mut node::Node<T>,
     pub end: *mut node::Node<T>,
